@@ -46,6 +46,7 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./config/airflow.cfg:/opt/airflow/airflow.cfg
     command: >
       bash -c "
       airflow db migrate &&
@@ -84,6 +85,7 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./config/airflow.cfg:/opt/airflow/airflow.cfg
     ports:
       - "8080:8080"
     command: airflow webserver --port 8080 --hostname 0.0.0.0
@@ -113,6 +115,7 @@ services:
       - ./data:/opt/airflow/data
       - ./logs:/opt/airflow/logs
       - ./plugins:/opt/airflow/plugins
+      - ./config/airflow.cfg:/opt/airflow/airflow.cfg
     command: airflow scheduler
 
 volumes:
