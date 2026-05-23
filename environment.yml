@@ -1,0 +1,12 @@
+name: asm2-spark-pipeline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - requests
+  - pymongo
+  - python-dotenv
+  - pip
+  - pip:
+      - apache-airflow-providers-apache-spark

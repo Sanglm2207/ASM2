@@ -1,0 +1,9 @@
+apache-airflow-providers-apache-spark
+apache-airflow-providers-celery
+apache-airflow-providers-redis
+pymongo
+pandas
+requests
+python-dotenv
+psycopg2-binary
+redis
