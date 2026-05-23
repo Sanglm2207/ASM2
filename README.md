@@ -1,81 +1,59 @@
-# ASM2 - DEP303x: Data Pipeline cho dữ liệu lớn từ Cloud
-
-## 1. Thông tin bài tập
+# ASM2 - Data Pipeline cho dữ liệu lớn từ Cloud
 
 **Môn học:** Dữ liệu lớn với Spark - DEP303x  
-**Bài tập:** ASM2  
-**Tên dự án:** Thiết lập Data Pipeline cho dữ liệu lớn từ Cloud
+**Bài tập:** Assignment 02  
+**Tên dự án:** Thiết lập Data Pipeline cho dữ liệu lớn từ Cloud  
 
-Dự án xây dựng một Data Pipeline hoàn chỉnh bằng **Apache Airflow**, **Apache Spark** và **MongoDB** để xử lý dữ liệu StackOverflow gồm hai file:
-
-- `Questions.csv`
-- `Answers.csv`
-
-Pipeline thực hiện các bước chính:
-
-1. Kiểm tra dữ liệu đã tồn tại hay chưa.
-2. Xoá file cũ nếu cần chạy lại pipeline.
-3. Tải file CSV từ Google Drive.
-4. Import dữ liệu CSV vào MongoDB.
-5. Dùng Spark xử lý dữ liệu.
-6. Xuất kết quả ra CSV.
-7. Import kết quả xử lý vào MongoDB.
-8. Thiết lập các task chạy song song bằng `LocalExecutor`.
-9. Cấu hình nâng cao `CeleryExecutor` với Redis và Worker.
+Project này xây dựng một Data Pipeline sử dụng **Apache Airflow**, **Apache Spark** và **MongoDB** để tải dữ liệu StackOverflow từ Google Drive, import vào MongoDB, xử lý bằng Spark và lưu kết quả xử lý trở lại MongoDB.
 
 ---
 
-## 2. Kiến trúc tổng quan
+## 1. Kiến trúc tổng quan
 
-### 2.1. Kiến trúc LocalExecutor
+Pipeline gồm các thành phần chính:
 
-Đây là kiến trúc chính dùng để chạy bài ASM2.
+| Thành phần | Vai trò |
+|---|---|
+| Airflow Webserver | Giao diện quản lý DAG tại `http://localhost:8080` |
+| Airflow Scheduler | Điều phối và thực thi task |
+| PostgreSQL | Metadata database cho Airflow |
+| MongoDB | Lưu dữ liệu raw và dữ liệu sau xử lý |
+| Spark | Xử lý dữ liệu lớn, tính số câu trả lời của từng câu hỏi |
+| Redis | Message broker cho CeleryExecutor ở yêu cầu nâng cao |
+| Airflow Worker | Worker xử lý task khi dùng CeleryExecutor |
+| Flower | UI theo dõi worker Celery tại `http://localhost:5555` |
+
+Luồng xử lý chính:
 
 ```text
-+--------------------------+
-|        Airflow UI        |
-|  http://localhost:8080   |
-+------------+-------------+
-             |
-             v
-+--------------------------+
-|   Airflow Webserver      |
-+--------------------------+
-             |
-             v
-+--------------------------+
-|   Airflow Scheduler      |
-|   Executor: LocalExecutor|
-+------------+-------------+
-             |
-             +------------------+
-             |                  |
-             v                  v
-+-------------------+   +-------------------+
-|   MongoDB         |   |   Spark Local      |
-|   Raw + Output DB |   |   spark-submit     |
-+-------------------+   +-------------------+
-             |
-             v
-+--------------------------+
-|  PostgreSQL Metadata DB  |
-|  Airflow metadata        |
-+--------------------------+
+start
+  ↓
+branching
+  ├── end
+  └── clear_file
+        ↓
+      download_answer_file_task      download_question_file_task
+        ↓                            ↓
+      import_answers_mongo           import_questions_mongo
+        └──────────────┬─────────────┘
+                       ↓
+                 spark_process
+                       ↓
+               import_output_mongo
+                       ↓
+                      end
 ```
 
-### 2.2. Các service Docker
+Hai nhóm task được thiết lập chạy song song:
 
-| Service | Vai trò |
-|---|---|
-| `asm2-postgres` | Metadata database cho Airflow |
-| `asm2-mongo` | Lưu dữ liệu raw và dữ liệu output |
-| `asm2-airflow-init` | Khởi tạo Airflow DB và user admin |
-| `asm2-airflow-webserver` | Giao diện Airflow UI |
-| `asm2-airflow-scheduler` | Điều phối và thực thi task với LocalExecutor |
+```text
+download_question_file_task  ||  download_answer_file_task
+import_questions_mongo       ||  import_answers_mongo
+```
 
 ---
 
-## 3. Cấu trúc thư mục
+## 2. Cấu trúc thư mục
 
 ```text
 ASM2/
@@ -87,68 +65,86 @@ ASM2/
 ├── spark/
 │   └── jobs/
 │       └── process_stackoverflow.py
-├── scripts/
-├── data/
-│   ├── raw/
-│   │   ├── Questions.csv
-│   │   └── Answers.csv
-│   └── output/
-│       └── question_answer_count/
+├── config/
+│   └── airflow.cfg
 ├── docker/
 │   └── airflow/
 │       └── Dockerfile
+├── data/
+│   ├── raw/
+│   └── output/
 ├── logs/
 ├── plugins/
-├── .env
+├── scripts/
+│   ├── build.sh
+│   ├── run-dev.sh
+│   ├── stop.sh
+│   ├── restart-airflow.sh
+│   ├── check.sh
+│   ├── setup-spark-connection.sh
+│   ├── reset-data.sh
+│   ├── test-spark.sh
+│   ├── logs.sh
+│   ├── run-celery.sh
+│   ├── rebuild-clean.sh
+│   └── export-output.sh
+├── submission/
 ├── .env.example
+├── .env
 ├── .gitignore
 ├── docker-compose.yml
 ├── docker-compose.celery.yml
 ├── requirements.txt
-├── environment.yml
-├── run.sh
-├── build.sh
-├── restart-airflow.sh
 └── README.md
 ```
 
 ---
 
-## 4. Lưu ý về đường dẫn dữ liệu
+## 3. Dataset
 
-Folder dữ liệu thật nằm trong project trên máy host:
+Project sử dụng 2 file CSV:
 
-```text
-ASM2/data/raw
-ASM2/data/output
-```
+### `Questions.csv`
 
-Nhưng Airflow chạy bên trong Docker container, nên trong code DAG và Spark job phải dùng đường dẫn bên trong container:
-
-```text
-/opt/airflow/data/raw
-/opt/airflow/data/output
-```
-
-Trong `docker-compose.yml`, folder `./data` được mount vào container:
-
-```yaml
-volumes:
-  - ./data:/opt/airflow/data
-```
-
-Vì vậy:
-
-| Trên máy host | Trong container Airflow |
+| Cột | Ý nghĩa |
 |---|---|
-| `ASM2/data/raw` | `/opt/airflow/data/raw` |
-| `ASM2/data/output` | `/opt/airflow/data/output` |
+| Id | Id của câu hỏi |
+| OwnerUserId | Id người tạo câu hỏi |
+| CreationDate | Ngày câu hỏi được tạo |
+| ClosedDate | Ngày câu hỏi kết thúc |
+| Score | Điểm số câu hỏi |
+| Title | Tiêu đề câu hỏi |
+| Body | Nội dung câu hỏi |
+
+### `Answers.csv`
+
+| Cột | Ý nghĩa |
+|---|---|
+| Id | Id của câu trả lời |
+| OwnerUserId | Id người tạo câu trả lời |
+| CreationDate | Ngày câu trả lời được tạo |
+| ParentId | Id câu hỏi mà câu trả lời thuộc về |
+| Score | Điểm số câu trả lời |
+| Body | Nội dung câu trả lời |
+
+Google Drive file IDs:
+
+```env
+QUESTIONS_FILE_ID=1kmrNUA8Uz9lKFcrkFyRCiReYuqFefxkO
+ANSWERS_FILE_ID=1cJnA9LLfCgO-H7gvExj7xj7U-7rqSKZo
+```
 
 ---
 
-## 5. Cấu hình môi trường
+## 4. File cấu hình môi trường
 
-### 5.1. File `.env.example`
+Tạo `.env` từ `.env.example`:
+
+```bash
+cp .env.example .env
+```
+
+Nội dung `.env` mẫu:
 
 ```env
 AIRFLOW_UID=50000
@@ -173,100 +169,98 @@ DATA_OUTPUT_PATH=/opt/airflow/data/output
 
 QUESTIONS_FILE_ID=1kmrNUA8Uz9lKFcrkFyRCiReYuqFefxkO
 ANSWERS_FILE_ID=1cJnA9LLfCgO-H7gvExj7xj7U-7rqSKZo
+
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
 ```
 
-Tạo file `.env`:
+Lưu ý với Mac M1/M2/M3:
 
-```bash
-cp .env.example .env
+```env
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
 ```
 
-### 5.2. Google Drive File ID
+Nếu chạy trên Intel/AMD64 Linux thì có thể dùng:
 
-Link Google Drive:
-
-```text
-Answers.csv:
-https://drive.google.com/file/d/1cJnA9LLfCgO-H7gvExj7xj7U-7rqSKZo/view?usp=sharing
-
-Questions.csv:
-https://drive.google.com/file/d/1kmrNUA8Uz9lKFcrkFyRCiReYuqFefxkO/view?usp=sharing
-```
-
-File ID là phần nằm giữa `/d/` và `/view`:
-
-```text
-Answers.csv   -> 1cJnA9LLfCgO-H7gvExj7xj7U-7rqSKZo
-Questions.csv -> 1kmrNUA8Uz9lKFcrkFyRCiReYuqFefxkO
-```
-
-Các file trên Google Drive cần để quyền:
-
-```text
-Anyone with the link can view
+```env
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ```
 
 ---
 
-## 6. Cài đặt dependencies
+## 5. File `airflow.cfg`
 
-### 6.1. File `requirements.txt`
+Đề bài yêu cầu có file `airflow.cfg` để thiết lập LocalExecutor.
 
-```txt
-apache-airflow-providers-apache-spark
-pymongo
-pandas
-requests
-python-dotenv
-psycopg2-binary
-```
-
-Lưu ý: dự án sử dụng custom file:
+File nên đặt tại:
 
 ```text
-dags/utils/google_drive_downloader.py
+config/airflow.cfg
 ```
 
-nên không cần phụ thuộc vào package `googledrivedownloader` nữa.
+Nội dung chính:
 
-### 6.2. File `environment.yml` cho local development
+```ini
+[core]
+executor = LocalExecutor
+load_examples = False
+dags_folder = /opt/airflow/dags
+dags_are_paused_at_creation = True
+default_timezone = utc
 
-Conda không bắt buộc vì runtime chính là Docker. Tuy nhiên có thể dùng Conda để test script Python local.
+[database]
+sql_alchemy_conn = postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+
+[webserver]
+secret_key = asm2_secret_key
+web_server_host = 0.0.0.0
+web_server_port = 8080
+
+[scheduler]
+dag_dir_list_interval = 30
+max_threads = 2
+
+[logging]
+base_log_folder = /opt/airflow/logs
+remote_logging = False
+```
+
+Trong `docker-compose.yml`, file này được mount vào container:
 
 ```yaml
-name: asm2-spark-pipeline
-channels:
-  - conda-forge
-dependencies:
-  - python=3.11
-  - pandas
-  - requests
-  - pymongo
-  - python-dotenv
-  - pip
+- ./config/airflow.cfg:/opt/airflow/airflow.cfg
 ```
 
-Tạo môi trường Conda:
+Ngoài ra vẫn giữ biến môi trường:
 
-```bash
-conda env create -f environment.yml
-conda activate asm2-spark-pipeline
+```yaml
+AIRFLOW__CORE__EXECUTOR: LocalExecutor
 ```
 
 ---
 
-## 7. Cách chạy project
+## 6. Các script hỗ trợ
 
-### 7.1. Chạy nhanh bằng `run.sh`
+Tất cả lệnh vận hành được gom trong thư mục:
 
-File `run.sh` dùng cho quá trình development, không ép build lại Docker image.
-
-```bash
-chmod +x run.sh
-./run.sh
+```text
+scripts/
 ```
 
-Nội dung khuyến nghị của `run.sh`:
+Cấp quyền chạy:
+
+```bash
+chmod +x scripts/*.sh
+```
+
+### 6.1. `scripts/build.sh`
+
+Dùng khi sửa `Dockerfile`, cài thêm system package, MongoDB tools, Java, Spark hoặc muốn build lại image chuẩn.
+
+```bash
+./scripts/build.sh
+```
+
+Nội dung khuyến nghị:
 
 ```bash
 #!/bin/bash
@@ -274,7 +268,7 @@ Nội dung khuyến nghị của `run.sh`:
 set -e
 
 echo "====================================="
-echo " ASM2 Pipeline - Dev Start"
+echo " ASM2 - Build Docker Images"
 echo "====================================="
 
 if [ ! -f ".env" ]; then
@@ -282,58 +276,24 @@ if [ ! -f ".env" ]; then
   cp .env.example .env
 fi
 
-mkdir -p dags spark/jobs scripts data/raw data/output logs plugins
+mkdir -p dags spark/jobs scripts data/raw data/output logs plugins config submission
 
-docker compose up -d
-
-echo "====================================="
-echo " Airflow is starting..."
-echo "====================================="
-echo "Airflow UI : http://localhost:8080"
-echo "Username   : admin"
-echo "Password   : admin"
-echo "MongoDB    : mongodb://localhost:27017"
-echo "====================================="
-```
-
-Truy cập Airflow UI:
-
-```text
-http://localhost:8080
-```
-
-Tài khoản mặc định:
-
-```text
-Username: admin
-Password: admin
-```
-
-### 7.2. Build lại Docker khi cần
-
-Chỉ build lại khi sửa:
-
-- `Dockerfile`
-- `requirements.txt` và muốn đóng gói image chuẩn
-- Java / Spark / MongoDB tools
-- package hệ thống bằng `apt`
-- base image Airflow
-
-Lệnh build:
-
-```bash
 docker compose down
 docker compose build
-docker compose up -d
+
+echo "Build completed."
+echo "Run project with: ./scripts/run-dev.sh"
 ```
 
-Nếu lỗi cache nặng mới dùng:
+### 6.2. `scripts/run-dev.sh`
+
+Dùng hằng ngày để chạy môi trường dev. Không ép build lại Docker.
 
 ```bash
-docker compose build --no-cache
+./scripts/run-dev.sh
 ```
 
-### 7.3. File `build.sh`
+Nội dung khuyến nghị:
 
 ```bash
 #!/bin/bash
@@ -341,403 +301,672 @@ docker compose build --no-cache
 set -e
 
 echo "====================================="
-echo " ASM2 Pipeline - Rebuild Docker Image"
+echo " ASM2 - Run Dev Environment"
 echo "====================================="
 
-docker compose down
-docker compose build
+if [ ! -f ".env" ]; then
+  echo ".env not found. Creating from .env.example..."
+  cp .env.example .env
+fi
+
+mkdir -p dags spark/jobs scripts data/raw data/output logs plugins config submission
+
 docker compose up -d
+
+echo "Airflow UI : http://localhost:8080"
+echo "Username   : admin"
+echo "Password   : admin"
+echo "MongoDB    : mongodb://localhost:27017"
+echo ""
+echo "Next steps:"
+echo "./scripts/check.sh"
+echo "./scripts/setup-spark-connection.sh"
+```
+
+### 6.3. `scripts/stop.sh`
+
+Dừng container, không xoá volume.
+
+```bash
+./scripts/stop.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "Stopping ASM2 containers..."
+docker compose down
+echo "Stopped."
+```
+
+### 6.4. `scripts/restart-airflow.sh`
+
+Dùng khi sửa DAG, Spark job hoặc downloader. Không build Docker.
+
+```bash
+./scripts/restart-airflow.sh
+```
+
+Nội dung khuyến nghị, có xử lý lỗi stale PID webserver:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Restart Airflow Safely"
+echo "====================================="
+
+echo "Stopping Airflow webserver and scheduler..."
+docker compose stop airflow-webserver airflow-scheduler || true
+
+echo "Removing old webserver container to avoid stale PID..."
+docker rm -f asm2-airflow-webserver || true
+
+echo "Starting Airflow services..."
+docker compose up -d airflow-webserver airflow-scheduler
+
+echo "Waiting for Airflow to reload..."
+sleep 20
+
+echo ""
+echo "Container status:"
+docker compose ps
+
+echo ""
+echo "Checking webserver:"
+curl -I http://localhost:8080 || true
+
+echo ""
+echo "Checking DAG import errors:"
+docker exec -it asm2-airflow-webserver airflow dags list-import-errors || true
+
+echo ""
+echo "Reserializing DAGs:"
+docker exec -it asm2-airflow-webserver airflow dags reserialize || true
+
+echo ""
+echo "Checking ASM2 DAG:"
+docker exec -it asm2-airflow-webserver airflow dags list | grep asm2 || true
 
 echo "Done."
 ```
 
-Cấp quyền:
+### 6.5. `scripts/check.sh`
+
+Check nhanh toàn bộ môi trường.
 
 ```bash
-chmod +x build.sh
+./scripts/check.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Check Environment"
+echo "====================================="
+
+echo ""
+echo "1. Docker Compose status:"
+docker compose ps
+
+echo ""
+echo "2. Airflow executor:"
+docker exec -it asm2-airflow-webserver airflow config get-value core executor || true
+
+echo ""
+echo "3. DAG import errors:"
+docker exec -it asm2-airflow-webserver airflow dags list-import-errors || true
+
+echo ""
+echo "4. DAG list:"
+docker exec -it asm2-airflow-webserver airflow dags list | grep asm2 || true
+
+echo ""
+echo "5. Java version:"
+docker exec -it asm2-airflow-scheduler java -version || true
+
+echo ""
+echo "6. Spark version:"
+docker exec -it asm2-airflow-scheduler spark-submit --version || true
+
+echo ""
+echo "7. MongoImport version:"
+docker exec -it asm2-airflow-scheduler mongoimport --version || true
+
+echo ""
+echo "8. Spark connection:"
+docker exec -it asm2-airflow-webserver airflow connections get spark_default || true
+
+echo ""
+echo "Check completed."
+```
+
+### 6.6. `scripts/setup-spark-connection.sh`
+
+Tạo connection `spark_default` để `SparkSubmitOperator` chạy local thay vì fallback sang YARN.
+
+```bash
+./scripts/setup-spark-connection.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Setup Spark Connection"
+echo "====================================="
+
+echo "Deleting old spark_default connection if exists..."
+docker exec -it asm2-airflow-webserver airflow connections delete spark_default || true
+
+echo "Creating spark_default connection..."
+docker exec -it asm2-airflow-webserver airflow connections add spark_default \
+  --conn-type spark \
+  --conn-host 'local[*]' \
+  --conn-extra '{"deploy-mode":"client"}'
+
+echo ""
+echo "Current spark_default connection:"
+docker exec -it asm2-airflow-webserver airflow connections get spark_default
+
+echo "Done."
+```
+
+### 6.7. `scripts/reset-data.sh`
+
+Xoá input/output local để ép DAG chạy full từ `clear_file`.
+
+```bash
+./scripts/reset-data.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Reset Data"
+echo "====================================="
+
+rm -f data/raw/Questions.csv
+rm -f data/raw/Answers.csv
+rm -rf data/output/question_answer_count
+
+echo "Local data cleaned:"
+echo "- data/raw/Questions.csv"
+echo "- data/raw/Answers.csv"
+echo "- data/output/question_answer_count"
+
+echo ""
+echo "If you want to also reset MongoDB collections, run:"
+echo "docker exec -it asm2-mongo mongosh"
+echo ""
+echo "Then inside mongosh:"
+echo "use stackoverflow_asm2"
+echo "db.questions.drop()"
+echo "db.answers.drop()"
+echo "db.answer_counts.drop()"
+```
+
+### 6.8. `scripts/test-spark.sh`
+
+Test riêng yêu cầu 6 bằng `spark-submit`.
+
+```bash
+./scripts/test-spark.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Test Spark Job"
+echo "====================================="
+
+docker exec -it asm2-airflow-scheduler bash -c '
+export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-arm64}
+export PATH=$JAVA_HOME/bin:$PATH
+
+echo "JAVA_HOME=$JAVA_HOME"
+echo "Testing spark-submit..."
+spark-submit --version
+
+echo "Running Spark job..."
+spark-submit \
+  --master local[*] \
+  --packages org.mongodb.spark:mongo-spark-connector_2.12:10.3.0 \
+  --conf spark.mongodb.read.connection.uri=mongodb://mongo:27017 \
+  --conf spark.mongodb.write.connection.uri=mongodb://mongo:27017 \
+  /opt/airflow/spark/jobs/process_stackoverflow.py
+'
+
+echo ""
+echo "Checking Spark output on host..."
+ls -lah data/output/question_answer_count || true
+
+echo ""
+echo "Preview output:"
+head -n 20 data/output/question_answer_count/part-*.csv || true
+```
+
+### 6.9. `scripts/logs.sh`
+
+Xem log nhanh theo service.
+
+```bash
+./scripts/logs.sh scheduler
+./scripts/logs.sh webserver
+./scripts/logs.sh mongo
+./scripts/logs.sh postgres
+./scripts/logs.sh worker
+./scripts/logs.sh redis
+./scripts/logs.sh flower
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+SERVICE=${1:-scheduler}
+
+case "$SERVICE" in
+  webserver)
+    docker logs -f asm2-airflow-webserver
+    ;;
+  scheduler)
+    docker logs -f asm2-airflow-scheduler
+    ;;
+  init)
+    docker logs -f asm2-airflow-init
+    ;;
+  mongo)
+    docker logs -f asm2-mongo
+    ;;
+  postgres)
+    docker logs -f asm2-postgres
+    ;;
+  worker)
+    docker logs -f asm2-airflow-worker
+    ;;
+  redis)
+    docker logs -f asm2-redis
+    ;;
+  flower)
+    docker logs -f asm2-airflow-flower
+    ;;
+  *)
+    echo "Unknown service: $SERVICE"
+    echo "Usage:"
+    echo "./scripts/logs.sh webserver"
+    echo "./scripts/logs.sh scheduler"
+    echo "./scripts/logs.sh init"
+    echo "./scripts/logs.sh mongo"
+    echo "./scripts/logs.sh postgres"
+    echo "./scripts/logs.sh worker"
+    echo "./scripts/logs.sh redis"
+    echo "./scripts/logs.sh flower"
+    exit 1
+    ;;
+esac
+```
+
+### 6.10. `scripts/run-celery.sh`
+
+Chạy bản CeleryExecutor cho yêu cầu 9.
+
+```bash
+./scripts/run-celery.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Run CeleryExecutor"
+echo "====================================="
+
+if [ ! -f ".env" ]; then
+  echo ".env not found. Creating from .env.example..."
+  cp .env.example .env
+fi
+
+if [ ! -f "docker-compose.celery.yml" ]; then
+  echo "docker-compose.celery.yml not found."
+  exit 1
+fi
+
+docker compose down
+docker compose -f docker-compose.celery.yml up -d
+
+echo "====================================="
+echo " CeleryExecutor environment started"
+echo "====================================="
+echo "Airflow UI : http://localhost:8080"
+echo "Flower UI  : http://localhost:5555"
+echo "Username   : admin"
+echo "Password   : admin"
+echo ""
+echo "Check executor:"
+echo "docker exec -it asm2-airflow-webserver airflow config get-value core executor"
+echo ""
+echo "Check worker:"
+echo "docker logs -f asm2-airflow-worker"
+```
+
+### 6.11. `scripts/rebuild-clean.sh`
+
+Chỉ dùng khi đổi base image hoặc lỗi cache nặng.
+
+```bash
+./scripts/rebuild-clean.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Clean Rebuild"
+echo "====================================="
+
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+
+echo "Clean rebuild completed."
+```
+
+### 6.12. `scripts/export-output.sh`
+
+Copy CSV Spark output ra folder `submission`.
+
+```bash
+./scripts/export-output.sh
+```
+
+Nội dung khuyến nghị:
+
+```bash
+#!/bin/bash
+
+set -e
+
+echo "====================================="
+echo " ASM2 - Export Processed CSV"
+echo "====================================="
+
+mkdir -p submission
+
+OUTPUT_FILE=$(find "data/output/question_answer_count" -name "part-*.csv" | head -n 1)
+
+if [ -z "$OUTPUT_FILE" ]; then
+  echo "No Spark output CSV found."
+  echo "Please run DAG or ./scripts/test-spark.sh first."
+  exit 1
+fi
+
+cp "$OUTPUT_FILE" submission/question_answer_count.csv
+
+echo "Exported to submission/question_answer_count.csv"
+echo ""
+head -n 20 submission/question_answer_count.csv
+```
+
+---
+
+## 7. Workflow chạy project
+
+### Lần đầu setup
+
+```bash
+cp .env.example .env
+chmod +x scripts/*.sh
+
+./scripts/build.sh
+./scripts/run-dev.sh
+./scripts/setup-spark-connection.sh
+./scripts/check.sh
+```
+
+Mở Airflow:
+
+```text
+http://localhost:8080
+```
+
+Login:
+
+```text
+admin / admin
+```
+
+### Khi sửa code DAG
+
+Các file liên quan:
+
+```text
+dags/asm2_stackoverflow_pipeline.py
+dags/utils/google_drive_downloader.py
 ```
 
 Chạy:
 
 ```bash
-./build.sh
+./scripts/restart-airflow.sh
 ```
 
----
+Không build Docker.
 
-## 8. Workflow development nhanh
+### Khi sửa Spark job
 
-### 8.1. Sửa DAG
-
-Khi sửa file:
-
-```text
-dags/asm2_stackoverflow_pipeline.py
-```
-
-Không cần build Docker.
-
-Chỉ cần restart scheduler nếu muốn Airflow nhận DAG nhanh hơn:
-
-```bash
-docker compose restart airflow-scheduler
-```
-
-Check lỗi import DAG:
-
-```bash
-docker exec -it asm2-airflow-webserver airflow dags list-import-errors
-```
-
-Check DAG đã load chưa:
-
-```bash
-docker exec -it asm2-airflow-webserver airflow dags list | grep asm2
-```
-
-### 8.2. Sửa Spark job
-
-Khi sửa file:
+File liên quan:
 
 ```text
 spark/jobs/process_stackoverflow.py
 ```
 
-Không cần build Docker vì folder `spark/` đã được mount vào container.
+Test nhanh:
 
-Chỉ cần trigger lại task `spark_process` hoặc trigger lại DAG.
+```bash
+./scripts/test-spark.sh
+```
 
-### 8.3. Sửa downloader Google Drive
+Hoặc restart scheduler rồi clear task `spark_process` trên Airflow UI:
 
-Khi sửa file:
+```bash
+./scripts/restart-airflow.sh
+```
+
+### Khi sửa Dockerfile hoặc thêm system package
+
+Các file liên quan:
 
 ```text
-dags/utils/google_drive_downloader.py
-```
-
-Không cần build Docker.
-
-Restart Airflow:
-
-```bash
-docker compose restart airflow-webserver airflow-scheduler
-```
-
-Test import downloader:
-
-```bash
-docker exec -it asm2-airflow-webserver python -c "from utils.google_drive_downloader import GoogleDriveDownloader as gdd; print('Downloader OK')"
-```
-
-### 8.4. Cài nóng package Python khi develop
-
-Nếu thiếu package trong lúc dev, có thể cài nóng vào container:
-
-```bash
-docker exec -it asm2-airflow-webserver pip install <package_name>
-docker exec -it asm2-airflow-scheduler pip install <package_name>
-```
-
-Sau đó nhớ thêm package vào `requirements.txt` để lần build sau không mất.
-
-### 8.5. Restart Airflow nhanh
-
-Tạo file `restart-airflow.sh`:
-
-```bash
-#!/bin/bash
-
-docker compose restart airflow-webserver airflow-scheduler
-docker exec -it asm2-airflow-webserver airflow dags list-import-errors
-```
-
-Cấp quyền:
-
-```bash
-chmod +x restart-airflow.sh
+docker/airflow/Dockerfile
+requirements.txt
 ```
 
 Chạy:
 
 ```bash
-./restart-airflow.sh
+./scripts/build.sh
+./scripts/run-dev.sh
+```
+
+Nếu lỗi cache nặng:
+
+```bash
+./scripts/rebuild-clean.sh
+```
+
+### Khi muốn chạy full pipeline từ đầu
+
+```bash
+./scripts/reset-data.sh
+```
+
+Sau đó vào Airflow UI:
+
+```text
+DAG asm2_stackoverflow_pipeline
+→ Trigger DAG
+```
+
+### Khi muốn xuất file CSV đã xử lý để nộp
+
+```bash
+./scripts/export-output.sh
+```
+
+File output:
+
+```text
+submission/question_answer_count.csv
 ```
 
 ---
 
-## 9. Luồng chạy của DAG
+## 8. Kiểm thử theo từng yêu cầu
 
-DAG ID:
+### Yêu cầu 1 - Task `start` và `end`
 
-```text
-asm2_stackoverflow_pipeline
-```
-
-Luồng tổng quát:
+Vào Airflow Graph View, kiểm tra có 2 task:
 
 ```text
 start
-  ↓
-branching
-  ├── end
-  └── clear_file
-        ↓
-      download_answer_file_task      download_question_file_task
-        ↓                            ↓
-      import_answers_mongo           import_questions_mongo
-        └──────────────┬─────────────┘
-                       ↓
-                 spark_process
-                       ↓
-               import_output_mongo
-                       ↓
-                      end
+end
 ```
 
-### 9.1. Ý nghĩa luồng rẽ nhánh
+Cả hai dùng `DummyOperator` hoặc fallback `EmptyOperator`.
 
-Task `branching` kiểm tra hai file:
+### Yêu cầu 2 - Task `branching`
 
-```text
-/opt/airflow/data/raw/Questions.csv
-/opt/airflow/data/raw/Answers.csv
+Task `branching` dùng `BranchPythonOperator`.
+
+Logic:
+
+| Điều kiện | Nhánh |
+|---|---|
+| Có đủ `Questions.csv` và `Answers.csv` | `branching -> end` |
+| Thiếu một trong hai file | `branching -> clear_file` |
+
+Test case đã có file:
+
+```bash
+touch data/raw/Questions.csv
+touch data/raw/Answers.csv
 ```
 
-Nếu cả hai file đã tồn tại:
+Trigger DAG. Kết quả:
 
 ```text
 start -> branching -> end
 ```
 
-Nếu thiếu một trong hai file:
-
-```text
-start -> branching -> clear_file -> download -> import -> spark -> import output -> end
-```
-
-Muốn test full pipeline từ đầu, xoá file raw trước:
+Test case chưa có file:
 
 ```bash
-rm -f data/raw/Questions.csv
-rm -f data/raw/Answers.csv
-rm -rf data/output/question_answer_count
+./scripts/reset-data.sh
 ```
 
-Sau đó trigger DAG trên Airflow UI.
+Trigger DAG. Kết quả:
 
----
-
-## 10. Mô tả đầy đủ 9 yêu cầu
-
-## Yêu cầu 1: Task `start` và `end`
-
-Yêu cầu tạo hai task `start` và `end` bằng `DummyOperator` để biểu diễn điểm bắt đầu và kết thúc DAG.
-
-Trong Airflow 2.x mới, `DummyOperator` đã được thay bằng `EmptyOperator`. Vì vậy code có xử lý tương thích:
-
-```python
-try:
-    from airflow.operators.dummy import DummyOperator
-except ImportError:
-    from airflow.operators.empty import EmptyOperator as DummyOperator
+```text
+start -> branching -> clear_file -> ...
 ```
+
+### Yêu cầu 3 - Task `clear_file`
+
+Task `clear_file` dùng `BashOperator`.
+
+Nhiệm vụ:
+
+```text
+Xoá Questions.csv
+Xoá Answers.csv
+Xoá output Spark cũ
+```
+
+Test:
+
+```bash
+./scripts/reset-data.sh
+```
+
+Sau khi trigger DAG, xem log task `clear_file` trong Airflow UI.
+
+### Yêu cầu 4 - Download CSV từ Google Drive
 
 Task:
 
-```python
-start = DummyOperator(task_id="start")
-
-end = DummyOperator(
-    task_id="end",
-    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
-)
+```text
+download_question_file_task
+download_answer_file_task
 ```
 
-`trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS` giúp task `end` chạy đúng khi DAG có nhiều nhánh và một số nhánh bị skip bởi `BranchPythonOperator`.
-
----
-
-## Yêu cầu 2: Task `branching`
-
-Task `branching` dùng `BranchPythonOperator` để kiểm tra dataset đã được tải xuống chưa.
-
-Logic:
-
-- Nếu có đủ `Questions.csv` và `Answers.csv` thì đi thẳng đến `end`.
-- Nếu thiếu file thì chuyển đến `clear_file`.
-
-```python
-def check_dataset_files() -> str:
-    questions_exists = QUESTIONS_FILE.exists()
-    answers_exists = ANSWERS_FILE.exists()
-
-    if questions_exists and answers_exists:
-        return "end"
-
-    return "clear_file"
-```
-
-Task:
-
-```python
-branching = BranchPythonOperator(
-    task_id="branching",
-    python_callable=check_dataset_files,
-)
-```
-
----
-
-## Yêu cầu 3: Task `clear_file`
-
-Task `clear_file` là task đầu tiên trong quá trình xử lý dữ liệu.
-
-Mục đích:
-
-- Xoá `Questions.csv` cũ.
-- Xoá `Answers.csv` cũ.
-- Xoá output Spark cũ.
-- Tránh lỗi ghi đè hoặc dùng nhầm dữ liệu cũ.
-
-Task sử dụng `BashOperator`:
-
-```python
-clear_file = BashOperator(
-    task_id="clear_file",
-    bash_command=f"""
-    echo "Start clearing old dataset files..."
-
-    mkdir -p "{DATA_RAW_PATH}"
-    mkdir -p "{DATA_OUTPUT_PATH}"
-
-    rm -f "{QUESTIONS_FILE}"
-    rm -f "{ANSWERS_FILE}"
-
-    rm -rf "{SPARK_OUTPUT_DIR}"
-
-    echo "Old input files and Spark output folder have been removed."
-    """,
-)
-```
-
----
-
-## Yêu cầu 4: Task `download_question_file_task` và `download_answer_file_task`
-
-Hai task này tải file CSV từ Google Drive về folder `data/raw`.
-
-Dự án sử dụng custom downloader:
+Dùng `PythonOperator` và custom downloader:
 
 ```text
 dags/utils/google_drive_downloader.py
 ```
 
-Lý do dùng custom downloader:
-
-- Package `googledrivedownloader` có thể lỗi với Google Drive Virus Scan warning.
-- File lớn trên Google Drive có thể trả về HTML confirmation page thay vì CSV thật.
-- Custom downloader xử lý confirm token, warning page và validate file sau khi tải.
-
-Task download dùng `PythonOperator`:
-
-```python
-download_question_file_task = PythonOperator(
-    task_id="download_question_file_task",
-    python_callable=download_question_file,
-)
-
-download_answer_file_task = PythonOperator(
-    task_id="download_answer_file_task",
-    python_callable=download_answer_file,
-)
-```
-
-Function download:
-
-```python
-def download_question_file() -> None:
-    DATA_RAW_PATH.mkdir(parents=True, exist_ok=True)
-
-    gdd.download_file_from_google_drive(
-        file_id=QUESTIONS_FILE_ID,
-        dest_path=str(QUESTIONS_FILE),
-        unzip=False,
-        overwrite=True,
-        showsize=True,
-    )
-```
-
-```python
-def download_answer_file() -> None:
-    DATA_RAW_PATH.mkdir(parents=True, exist_ok=True)
-
-    gdd.download_file_from_google_drive(
-        file_id=ANSWERS_FILE_ID,
-        dest_path=str(ANSWERS_FILE),
-        unzip=False,
-        overwrite=True,
-        showsize=True,
-    )
-```
-
-Sau khi tải xong, kiểm tra file:
+Test output:
 
 ```bash
+ls -lah data/raw
 head -n 3 data/raw/Questions.csv
 head -n 3 data/raw/Answers.csv
 ```
 
-File đúng phải có header CSV, không phải HTML.
+Kỳ vọng có:
 
----
-
-## Yêu cầu 5: Task `import_questions_mongo` và `import_answers_mongo`
-
-Sau khi tải file CSV, dữ liệu được import vào MongoDB bằng `mongoimport`.
-
-Cú pháp yêu cầu:
-
-```bash
-mongoimport --type csv -d <database> -c <collection> --headerline --drop <file>
+```text
+Questions.csv
+Answers.csv
 ```
 
-Task import Questions:
+### Yêu cầu 5 - Import CSV vào MongoDB
 
-```python
-import_questions_mongo = BashOperator(
-    task_id="import_questions_mongo",
-    bash_command=f"""
-    mongoimport \
-      --uri="{MONGO_URI}" \
-      --type csv \
-      -d "{MONGO_DATABASE}" \
-      -c questions \
-      --headerline \
-      --drop \
-      "{QUESTIONS_FILE}"
-    """,
-)
+Task:
+
+```text
+import_questions_mongo
+import_answers_mongo
 ```
 
-Task import Answers:
+Dùng `BashOperator` với `mongoimport`.
 
-```python
-import_answers_mongo = BashOperator(
-    task_id="import_answers_mongo",
-    bash_command=f"""
-    mongoimport \
-      --uri="{MONGO_URI}" \
-      --type csv \
-      -d "{MONGO_DATABASE}" \
-      -c answers \
-      --headerline \
-      --drop \
-      "{ANSWERS_FILE}"
-    """,
-)
-```
-
-Kiểm tra MongoDB:
+Test:
 
 ```bash
 docker exec -it asm2-mongo mongosh
@@ -747,113 +976,52 @@ Trong Mongo shell:
 
 ```javascript
 use stackoverflow_asm2
+
 show collections
 
 db.questions.countDocuments()
 db.answers.countDocuments()
 ```
 
----
-
-## Yêu cầu 6: Task `spark_process`
-
-Task `spark_process` dùng `SparkSubmitOperator` để submit Spark job.
-
-Yêu cầu xử lý:
-
-- Dựa vào tập `Answers.csv` hoặc collection `answers`.
-- Mỗi câu trả lời có `ParentId` là ID của câu hỏi.
-- Đếm mỗi câu hỏi có bao nhiêu câu trả lời.
-
-Output:
+Kỳ vọng có:
 
 ```text
-+----+-----------------+
-| Id | Number of answers |
-+----+-----------------+
+questions
+answers
 ```
 
-Spark job nằm tại:
+và count > 0.
+
+### Yêu cầu 6 - Spark process
+
+Task:
+
+```text
+spark_process
+```
+
+Dùng `SparkSubmitOperator`.
+
+Spark job:
 
 ```text
 spark/jobs/process_stackoverflow.py
 ```
 
-Logic chính:
+Logic xử lý:
 
-```python
-result_df = (
-    answers_df
-    .filter(col("ParentId").isNotNull())
-    .groupBy(col("ParentId").alias("Id"))
-    .agg(count("*").alias("Number of answers"))
-    .orderBy(col("Id").cast("int"))
-)
+```text
+Đọc collection answers
+Group by ParentId
+Đếm số answer của mỗi question
+Đổi ParentId thành Id
+Ghi output CSV
 ```
 
-Ghi output CSV:
-
-```python
-(
-    result_df
-    .coalesce(1)
-    .write
-    .mode("overwrite")
-    .option("header", True)
-    .csv(str(OUTPUT_DIR))
-)
-```
-
-Task Airflow:
-
-```python
-spark_process = SparkSubmitOperator(
-    task_id="spark_process",
-    application=SPARK_JOB_FILE,
-    conn_id="spark_default",
-    packages="org.mongodb.spark:mongo-spark-connector_2.12:10.3.0",
-    conf={
-        "spark.mongodb.read.connection.uri": MONGO_URI,
-        "spark.mongodb.write.connection.uri": MONGO_URI,
-    },
-    env_vars={
-        "JAVA_HOME": "/usr/lib/jvm/java-17-openjdk-arm64",
-        "MONGO_URI": MONGO_URI,
-        "MONGO_DATABASE": MONGO_DATABASE,
-        "DATA_RAW_PATH": str(DATA_RAW_PATH),
-        "DATA_OUTPUT_PATH": str(DATA_OUTPUT_PATH),
-    },
-    verbose=True,
-)
-```
-
-### Test riêng yêu cầu 6
-
-Tạo Spark connection:
+Test riêng:
 
 ```bash
-docker exec -it asm2-airflow-webserver airflow connections delete spark_default
-
-docker exec -it asm2-airflow-webserver airflow connections add spark_default \
-  --conn-type spark \
-  --conn-host 'local[*]' \
-  --conn-extra '{"deploy-mode":"client"}'
-```
-
-Test `spark-submit`:
-
-```bash
-docker exec -it asm2-airflow-scheduler bash -c '
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
-export PATH=$JAVA_HOME/bin:$PATH
-
-spark-submit \
-  --master local[*] \
-  --packages org.mongodb.spark:mongo-spark-connector_2.12:10.3.0 \
-  --conf spark.mongodb.read.connection.uri=mongodb://mongo:27017 \
-  --conf spark.mongodb.write.connection.uri=mongodb://mongo:27017 \
-  /opt/airflow/spark/jobs/process_stackoverflow.py
-'
+./scripts/test-spark.sh
 ```
 
 Check output:
@@ -863,308 +1031,28 @@ ls -lah data/output/question_answer_count
 head -n 20 data/output/question_answer_count/part-*.csv
 ```
 
----
+Kỳ vọng:
 
-## Yêu cầu 7: Task `import_output_mongo`
+```csv
+Id,Number of answers
+80,3
+90,3
+120,1
+180,9
+260,9
+```
 
-Sau khi Spark ghi output ra CSV, task này import file output vào MongoDB collection `answer_counts`.
+### Yêu cầu 7 - Import Spark output vào MongoDB
 
-Spark output là một folder gồm:
+Task:
 
 ```text
-part-00000-xxxx.csv
-_SUCCESS
+import_output_mongo
 ```
 
-Vì vậy cần tìm file `part-*.csv` trước khi import.
+Dùng `BashOperator` với `mongoimport`.
 
-```python
-import_output_mongo = BashOperator(
-    task_id="import_output_mongo",
-    bash_command=f"""
-    OUTPUT_FILE=$(find "{SPARK_OUTPUT_DIR}" -name "part-*.csv" | head -n 1)
-
-    if [ -z "$OUTPUT_FILE" ]; then
-      echo "No Spark output CSV file found in {SPARK_OUTPUT_DIR}"
-      exit 1
-    fi
-
-    mongoimport \
-      --uri="{MONGO_URI}" \
-      --type csv \
-      -d "{MONGO_DATABASE}" \
-      -c answer_counts \
-      --headerline \
-      --drop \
-      "$OUTPUT_FILE"
-    """,
-)
-```
-
-Kiểm tra MongoDB:
-
-```javascript
-use stackoverflow_asm2
-
-db.answer_counts.find().limit(20)
-db.answer_counts.countDocuments()
-```
-
----
-
-## Yêu cầu 8: Sắp xếp thứ tự task và chạy song song bằng LocalExecutor
-
-DAG được sắp xếp đúng theo flow đề bài:
-
-```python
-start >> branching
-
-branching >> end
-branching >> clear_file
-
-clear_file >> [
-    download_answer_file_task,
-    download_question_file_task,
-]
-
-download_answer_file_task >> import_answers_mongo
-download_question_file_task >> import_questions_mongo
-
-[
-    import_answers_mongo,
-    import_questions_mongo,
-] >> spark_process
-
-spark_process >> import_output_mongo
-import_output_mongo >> end
-```
-
-Các task chạy song song:
-
-```text
-download_question_file_task và download_answer_file_task
-import_questions_mongo và import_answers_mongo
-```
-
-Airflow được cấu hình dùng `LocalExecutor`:
-
-```yaml
-environment:
-  AIRFLOW__CORE__EXECUTOR: LocalExecutor
-```
-
-Check executor:
-
-```bash
-docker exec -it asm2-airflow-webserver airflow config get-value core executor
-```
-
-Kết quả đúng:
-
-```text
-LocalExecutor
-```
-
----
-
-## Yêu cầu 9: Cài đặt CeleryExecutor cho Airflow
-
-Yêu cầu nâng cao cấu hình Airflow chạy với `CeleryExecutor`.
-
-Kiến trúc CeleryExecutor:
-
-```text
-+-------------------+
-| Airflow Webserver |
-+-------------------+
-          |
-          v
-+-------------------+       +----------------+
-| Airflow Scheduler | ----> | Redis Broker   |
-+-------------------+       +----------------+
-                                  |
-                                  v
-                           +---------------+
-                           | Airflow Worker|
-                           +---------------+
-                                  |
-                                  v
-                           +---------------+
-                           | Execute Tasks |
-                           +---------------+
-```
-
-Các service bổ sung:
-
-| Service | Vai trò |
-|---|---|
-| `asm2-redis` | Message broker cho Celery |
-| `asm2-airflow-worker` | Worker nhận task từ Redis và thực thi |
-
-File cấu hình riêng:
-
-```text
-docker-compose.celery.yml
-```
-
-Các biến môi trường chính:
-
-```yaml
-AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres:5432/airflow
-```
-
-Chạy CeleryExecutor:
-
-```bash
-docker compose down
-
-docker compose -f docker-compose.celery.yml up -d --build
-```
-
-Nếu image đã build rồi:
-
-```bash
-docker compose -f docker-compose.celery.yml up -d
-```
-
-Check executor:
-
-```bash
-docker exec -it asm2-airflow-webserver airflow config get-value core executor
-```
-
-Kết quả đúng:
-
-```text
-CeleryExecutor
-```
-
-Check worker:
-
-```bash
-docker compose -f docker-compose.celery.yml ps
-```
-
-Check log worker:
-
-```bash
-docker logs -f asm2-airflow-worker
-```
-
-Nếu thấy worker `ready` thì CeleryExecutor đã hoạt động.
-
----
-
-## 11. Các lệnh kiểm tra nhanh
-
-### Check container
-
-```bash
-docker compose ps
-```
-
-### Check log webserver
-
-```bash
-docker logs --tail=100 asm2-airflow-webserver
-```
-
-### Check log scheduler
-
-```bash
-docker logs --tail=100 asm2-airflow-scheduler
-```
-
-### Check import error DAG
-
-```bash
-docker exec -it asm2-airflow-webserver airflow dags list-import-errors
-```
-
-### Check DAG list
-
-```bash
-docker exec -it asm2-airflow-webserver airflow dags list | grep asm2
-```
-
-### Check MongoDB tools
-
-```bash
-docker exec -it asm2-airflow-webserver mongoimport --version
-```
-
-### Check Java
-
-```bash
-docker exec -it asm2-airflow-webserver java -version
-```
-
-### Check Spark
-
-```bash
-docker exec -it asm2-airflow-webserver spark-submit --version
-```
-
-### Check Spark connection
-
-```bash
-docker exec -it asm2-airflow-webserver airflow connections get spark_default
-```
-
-### Tạo lại Spark connection
-
-```bash
-docker exec -it asm2-airflow-webserver airflow connections delete spark_default
-
-docker exec -it asm2-airflow-webserver airflow connections add spark_default \
-  --conn-type spark \
-  --conn-host 'local[*]' \
-  --conn-extra '{"deploy-mode":"client"}'
-```
-
----
-
-## 12. Cách test full pipeline
-
-Xoá file raw để ép DAG chạy toàn bộ pipeline:
-
-```bash
-rm -f data/raw/Questions.csv
-rm -f data/raw/Answers.csv
-rm -rf data/output/question_answer_count
-```
-
-Trigger DAG trong Airflow UI:
-
-```text
-DAGs -> asm2_stackoverflow_pipeline -> Trigger DAG
-```
-
-Kết quả mong muốn:
-
-```text
-start                      success
-branching                  success
-clear_file                 success
-download_question_file_task success
-download_answer_file_task  success
-import_questions_mongo     success
-import_answers_mongo       success
-spark_process              success
-import_output_mongo        success
-end                        success
-```
-
-Check output file:
-
-```bash
-ls -lah data/output/question_answer_count
-head -n 20 data/output/question_answer_count/part-*.csv
-```
-
-Check MongoDB:
+Test:
 
 ```bash
 docker exec -it asm2-mongo mongosh
@@ -1175,97 +1063,135 @@ Trong Mongo shell:
 ```javascript
 use stackoverflow_asm2
 
-show collections
-
-db.questions.countDocuments()
-db.answers.countDocuments()
 db.answer_counts.countDocuments()
 db.answer_counts.find().limit(20)
 ```
 
-Kết quả mong muốn có 3 collection:
+Kỳ vọng collection:
 
 ```text
-questions
-answers
 answer_counts
+```
+
+và document có dạng:
+
+```javascript
+{
+  Id: 80,
+  "Number of answers": 3
+}
+```
+
+### Yêu cầu 8 - Sắp xếp task và chạy song song bằng LocalExecutor
+
+Check executor:
+
+```bash
+docker exec -it asm2-airflow-webserver airflow config get-value core executor
+```
+
+Kỳ vọng:
+
+```text
+LocalExecutor
+```
+
+Check Graph View trong Airflow:
+
+```text
+download_question_file_task và download_answer_file_task chạy song song
+import_questions_mongo và import_answers_mongo chạy song song
+```
+
+Có thể chụp màn hình Graph View DAG xanh hết để nộp.
+
+### Yêu cầu 9 - CeleryExecutor và Flower
+
+Chạy bản Celery:
+
+```bash
+./scripts/run-celery.sh
+```
+
+Check executor:
+
+```bash
+docker exec -it asm2-airflow-webserver airflow config get-value core executor
+```
+
+Kỳ vọng:
+
+```text
+CeleryExecutor
+```
+
+Check container:
+
+```bash
+docker compose -f docker-compose.celery.yml ps
+```
+
+Kỳ vọng có:
+
+```text
+asm2-redis
+asm2-airflow-worker
+asm2-airflow-flower
+asm2-airflow-webserver
+asm2-airflow-scheduler
+```
+
+Mở Flower:
+
+```text
+http://localhost:5555
+```
+
+Chụp màn hình Flower thấy worker online:
+
+```text
+celery@...
+Status: online
+```
+
+Đây là ảnh nộp cho phần:
+
+```text
+Ảnh chụp màn hình của Flower để thiết lập các Worker
 ```
 
 ---
 
-## 13. Troubleshooting
+## 9. Các lỗi thường gặp và cách xử lý
 
-### 13.1. DAG missing from DagBag
+### 9.1. DAG missing from DagBag
 
-Check lỗi:
+Check lỗi import:
 
 ```bash
 docker exec -it asm2-airflow-webserver airflow dags list-import-errors
 ```
 
-Nguyên nhân thường gặp:
-
-- Thiếu package Python.
-- Sai import module.
-- File DAG lỗi syntax.
-- File chưa mount vào container.
-
-Check file DAG trong container:
+Sau khi sửa DAG:
 
 ```bash
-docker exec -it asm2-airflow-webserver ls -lah /opt/airflow/dags
+./scripts/restart-airflow.sh
 ```
 
-### 13.2. Google Drive tải về HTML thay vì CSV
+### 9.2. Spark fallback sang YARN
 
-Nếu log báo:
-
-```text
-Downloaded file looks like an HTML page, not a real CSV file
-```
-
-Nguyên nhân:
-
-- Google Drive trả warning page.
-- File chưa share public.
-- Quota exceeded.
-- Need access.
-
-Cách xử lý:
-
-```bash
-rm -f data/raw/Questions.csv
-rm -f data/raw/Answers.csv
-```
-
-Check lại quyền Google Drive:
-
-```text
-Anyone with the link can view
-```
-
-Test downloader:
-
-```bash
-docker exec -it asm2-airflow-webserver python -c "from utils.google_drive_downloader import GoogleDriveDownloader as gdd; print('Downloader OK')"
-```
-
-### 13.3. SparkSubmitOperator fallback sang YARN
-
-Nếu log có:
+Log lỗi:
 
 ```text
 Could not load connection string spark_default, defaulting to yarn
 spark-submit --master yarn
 ```
 
-Tạo Spark connection:
+Fix:
 
 ```bash
-docker exec -it asm2-airflow-webserver airflow connections add spark_default \
-  --conn-type spark \
-  --conn-host 'local[*]' \
-  --conn-extra '{"deploy-mode":"client"}'
+./scripts/setup-spark-connection.sh
+docker compose restart airflow-scheduler
 ```
 
 Log đúng phải là:
@@ -1274,27 +1200,18 @@ Log đúng phải là:
 spark-submit --master local[*]
 ```
 
-### 13.4. Spark lỗi JAVA_HOME amd64 trên Mac M1/M2/M3
+### 9.3. Spark lỗi JAVA_HOME
 
-Nếu log có:
+Log lỗi:
 
 ```text
 /usr/lib/jvm/java-17-openjdk-amd64/bin/java: No such file or directory
 ```
 
-Set trong `docker-compose.yml`:
+Fix trên Mac M1/M2/M3:
 
-```yaml
-environment:
-  JAVA_HOME: /usr/lib/jvm/java-17-openjdk-arm64
-```
-
-Hoặc trong `SparkSubmitOperator`:
-
-```python
-env_vars={
-    "JAVA_HOME": "/usr/lib/jvm/java-17-openjdk-arm64",
-}
+```env
+JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
 ```
 
 Recreate container, không cần build:
@@ -1303,75 +1220,160 @@ Recreate container, không cần build:
 docker compose up -d --force-recreate airflow-webserver airflow-scheduler
 ```
 
-### 13.5. Task bị skipped
+Check:
 
-Nếu DAG chỉ chạy:
-
-```text
-start -> branching -> end
+```bash
+docker exec -it asm2-airflow-scheduler bash -c 'echo $JAVA_HOME'
+docker exec -it asm2-airflow-scheduler spark-submit --version
 ```
 
-và các task còn lại bị skipped, điều này đúng nếu hai file đã tồn tại:
+### 9.4. Google Drive tải về HTML thay vì CSV
+
+Log lỗi:
 
 ```text
-data/raw/Questions.csv
-data/raw/Answers.csv
+Downloaded file is HTML, not CSV
 ```
 
-Muốn chạy full pipeline:
+Nguyên nhân thường là Google Drive trả về warning page hoặc file chưa public.
+
+Cần check:
+
+```text
+Anyone with the link can view
+```
+
+Sau đó xoá file tải lỗi:
 
 ```bash
 rm -f data/raw/Questions.csv
 rm -f data/raw/Answers.csv
-rm -rf data/output/question_answer_count
 ```
 
-Sau đó trigger DAG lại.
+Trigger DAG lại.
 
----
+### 9.5. Webserver lỗi stale PID
 
-## 14. Ghi chú về Dev, Staging, Production
+Log lỗi:
 
-### Development
+```text
+Error: Already running on PID ... or pid file '/opt/airflow/airflow-webserver.pid' is stale
+```
 
-Trong giai đoạn develop:
-
-- Không build lại Docker khi chỉ sửa DAG/Spark job/script.
-- Dùng volume mount để code cập nhật ngay vào container.
-- Có thể cài nóng package để test nhanh.
-- Restart scheduler/webserver khi cần.
-
-### Staging / Production
-
-Trong staging hoặc production:
-
-- Không cài nóng package trong container.
-- Build image từ `Dockerfile` + `requirements.txt`.
-- Tag image theo version.
-- Deploy image cố định.
-
-Ví dụ:
+Fix nhanh:
 
 ```bash
-docker build -t asm2-airflow:1.0.0 -f docker/airflow/Dockerfile .
+docker compose stop airflow-webserver
+docker rm -f asm2-airflow-webserver
+docker compose up -d airflow-webserver
+```
+
+Hoặc dùng:
+
+```bash
+./scripts/restart-airflow.sh
 ```
 
 ---
 
-## 15. Kết luận
+## 10. Các file cần nộp
 
-Dự án đã triển khai đầy đủ 9 yêu cầu của ASM2:
+Nên chuẩn bị folder:
 
-| Yêu cầu | Nội dung | Trạng thái |
+```text
+submission/
+├── question_answer_count.csv
+└── screenshots/
+    ├── 01_airflow_graph_success.png
+    ├── 02_local_executor.png
+    ├── 03_mongodb_answer_counts.png
+    ├── 04_spark_output_csv.png
+    ├── 05_celery_executor.png
+    ├── 06_flower_workers.png
+    └── 07_flower_tasks.png
+```
+
+Tạo file CSV output:
+
+```bash
+./scripts/export-output.sh
+```
+
+Các ảnh nên chụp:
+
+| Ảnh | Nội dung |
+|---|---|
+| `01_airflow_graph_success.png` | Graph View DAG xanh hết |
+| `02_local_executor.png` | Terminal hiển thị `LocalExecutor` |
+| `03_mongodb_answer_counts.png` | MongoDB `db.answer_counts.find().limit(20)` |
+| `04_spark_output_csv.png` | Terminal `head -n 20 submission/question_answer_count.csv` |
+| `05_celery_executor.png` | Terminal hiển thị `CeleryExecutor` |
+| `06_flower_workers.png` | Flower UI worker online |
+| `07_flower_tasks.png` | Flower UI task đã chạy qua worker |
+
+---
+
+## 11. Tóm tắt trạng thái 9 yêu cầu
+
+| Yêu cầu | Nội dung | File / Task |
 |---|---|---|
-| 1 | Tạo task `start` và `end` | Hoàn thành |
-| 2 | Tạo task `branching` bằng `BranchPythonOperator` | Hoàn thành |
-| 3 | Tạo task `clear_file` bằng `BashOperator` | Hoàn thành |
-| 4 | Tải `Questions.csv` và `Answers.csv` từ Google Drive | Hoàn thành |
-| 5 | Import CSV vào MongoDB bằng `mongoimport` | Hoàn thành |
-| 6 | Xử lý dữ liệu bằng Spark | Hoàn thành |
-| 7 | Import output Spark vào MongoDB | Hoàn thành |
-| 8 | Sắp xếp task và chạy song song bằng `LocalExecutor` | Hoàn thành |
-| 9 | Cấu hình nâng cao `CeleryExecutor` | Hoàn thành |
+| 1 | Tạo task start và end | `start`, `end` |
+| 2 | Branch kiểm tra file đã tải chưa | `branching` |
+| 3 | Xoá file cũ trước khi tải | `clear_file` |
+| 4 | Download Questions.csv và Answers.csv | `download_question_file_task`, `download_answer_file_task` |
+| 5 | Import raw CSV vào MongoDB | `import_questions_mongo`, `import_answers_mongo` |
+| 6 | Spark xử lý số answer mỗi question | `spark_process`, `process_stackoverflow.py` |
+| 7 | Import output Spark vào MongoDB | `import_output_mongo` |
+| 8 | Sắp xếp task, chạy song song, LocalExecutor | `docker-compose.yml`, `airflow.cfg` |
+| 9 | CeleryExecutor, Redis, Worker, Flower | `docker-compose.celery.yml`, `airflow-worker`, `airflow-flower` |
 
-Pipeline đáp ứng đầy đủ yêu cầu xử lý dữ liệu lớn từ Cloud bằng Airflow, MongoDB và Spark.
+---
+
+## 12. Quick commands
+
+Chạy dev:
+
+```bash
+./scripts/run-dev.sh
+./scripts/setup-spark-connection.sh
+```
+
+Check:
+
+```bash
+./scripts/check.sh
+```
+
+Reset data và chạy full:
+
+```bash
+./scripts/reset-data.sh
+```
+
+Sau đó trigger DAG trên Airflow UI.
+
+Test Spark:
+
+```bash
+./scripts/test-spark.sh
+```
+
+Export output:
+
+```bash
+./scripts/export-output.sh
+```
+
+Chạy CeleryExecutor:
+
+```bash
+./scripts/run-celery.sh
+```
+
+Mở UI:
+
+```text
+Airflow: http://localhost:8080
+Flower : http://localhost:5555
+MongoDB: mongodb://localhost:27017
+```

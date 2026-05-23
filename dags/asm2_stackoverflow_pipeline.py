@@ -256,6 +256,44 @@ with DAG(
     )
 
     # =================================================================
+    # REQUIREMENT 5: TASK import_answers_mongo
+    # =================================================================
+    # Sau khi Answers.csv đã được tải xuống, task này import file CSV
+    # vào MongoDB.
+    #
+    # Collection answers sẽ được Spark sử dụng để tính toán số lượng
+    # câu trả lời của từng câu hỏi.
+    #
+    # Theo yêu cầu đề bài, sử dụng BashOperator với mongoimport:
+    #
+    # mongoimport --type csv -d <database> -c <collection> --headerline --drop <file>
+    #
+    # Giải thích option:
+    # - --uri       : URI kết nối tới MongoDB.
+    # - --type csv  : Dữ liệu đầu vào là file CSV.
+    # - -d          : Tên database MongoDB.
+    # - -c          : Tên collection.
+    # - --headerline: Dòng đầu tiên của CSV là tên cột.
+    # - --drop      : Xoá collection cũ trước khi import lại.
+    import_answers_mongo = BashOperator(
+        task_id="import_answers_mongo",
+        bash_command=f"""
+        echo "Importing Answers.csv into MongoDB..."
+
+        mongoimport \
+          --uri="{MONGO_URI}" \
+          --type csv \
+          -d "{MONGO_DATABASE}" \
+          -c answers \
+          --headerline \
+          --drop \
+          "{ANSWERS_FILE}"
+
+        echo "Answers.csv imported."
+        """,
+    )
+
+    # =================================================================
     # REQUIREMENT 6: TASK spark_process
     # =================================================================
     # Task này submit Spark job để xử lý dữ liệu.
